@@ -11,20 +11,25 @@ pub enum Command {
 }
 
 pub enum LastParam {
-    Read(oneshot::Sender<Option<u64>>),
-    Write(u64)
+    Read(oneshot::Sender<Option<i32>>),
+    Write(i32)
 }
 
-type Channel = (Command, u64, LastParam);
+type Channel = (Command, i32, LastParam);
 type Receiver = mpsc::Receiver<Channel>;
 type Sender = mpsc::Sender<Channel>;
 
+struct TMapTable {
+    table: Vec<Sender>,
+    partion: i32
+}
+
 pub struct TMap {
-    tables: HashMap<String, Sender>,
+    tables: HashMap<String, TMapTable>,
 }
 
 pub async fn receive(mut receiver: Receiver) {
-    let mut map: HashMap<u64, u64> = HashMap::new();
+    let mut map: HashMap<i32, i32> = HashMap::new();
 
     while let Some(request) = receiver.recv().await {
         match request {
@@ -52,25 +57,35 @@ impl TMap {
         }
     }
 
-    pub fn create_table(&mut self, name: &str) -> Receiver {
-        let (mut sender, mut receiver) = mpsc::channel::<Channel>(100);
-        self.tables.insert(name.to_string(), sender);
-        receiver
+    pub fn create_table_with_partion(&mut self, name: &str, partion: i32) -> Vec<Receiver> {
+        let mut senders = Vec::new();
+        let mut receivers = Vec::new();
+
+        for _ in 0..partion {
+            let (mut sender, mut receiver) = mpsc::channel::<Channel>(100);
+            senders.push(sender);
+            receivers.push(receiver);
+        }
+        let table = TMapTable{table: senders, partion: partion};
+        self.tables.insert(name.to_string(), table);
+       receivers
     }
 
-    pub fn get_sender(&self, name: &str) -> Sender{
-        self.tables.get(name).unwrap().clone()
+    pub fn get_sender(&self, name: &str, key: i32) -> Sender {
+        let partion = self.tables.get(name).unwrap().partion;
+        let index = key % partion;
+        unsafe { self.tables.get(name).unwrap().table.get_unchecked(index as usize).clone() }
     }
 }
 
-pub async fn write(sender: &mut Sender, key: u64, val: u64) {
+pub async fn write(sender: &mut Sender, key: i32, val: i32) {
     if let Err(e) = sender.send((Command::Write, key, LastParam::Write(val))).await {
         // TODO: handle error
         println!("the error {:}", e);
     };
 }
 
-pub async fn read(sender: &mut Sender, key: u64, resp_sender: oneshot::Sender<Option<u64>>) {
+pub async fn read(sender: &mut Sender, key: i32, resp_sender: oneshot::Sender<Option<i32>>) {
     if let Err(e) = sender.send((Command::Read, key, LastParam::Read(resp_sender))).await {
       // TODO: handle error
       println!("the error {:}", e);
@@ -84,24 +99,35 @@ mod tests {
     #[tokio::test]
     async fn test_basic() {
         let tables = RwLock::new(TMap::new());
-        let mut rx = tables.write().unwrap().create_table("test");
-        tokio::spawn(receive(rx));
+        let mut rxs = tables.write().unwrap().create_table_with_partion("test", 3);
+
+        for rx in rxs {
+            tokio::spawn(receive(rx));
+        }
 
         tokio::spawn(async move {
-            let sender = tables.read().unwrap().get_sender("test");
-            write(&mut sender.clone(), 10 as u64, 11 as u64).await;
+            let sender = tables.read().unwrap().get_sender("test", 10);
+            write(&mut sender.clone(), 0, 11).await;
 
-            let (resp_tx, resp_rx) = oneshot::channel::<Option<u64>>();
-            read(&mut sender.clone(), 10 as u64, resp_tx).await;
-
+            let (resp_tx, resp_rx) = oneshot::channel::<Option<i32>>();
+            read(&mut sender.clone(), 0, resp_tx).await;
             let v = resp_rx.await.unwrap();
             assert_eq!(v, Some(11));
 
-            let (resp_tx, resp_rx) = oneshot::channel::<Option<u64>>();
-            read(&mut sender.clone(), 1123 as u64, resp_tx).await;
+            let (resp_tx, resp_rx) = oneshot::channel::<Option<i32>>();
+            read(&mut sender.clone(), 1123, resp_tx).await;
 
             let v = resp_rx.await.unwrap();
             assert_eq!(v, None);
+
+            for i in (1..1000) {
+                write(&mut sender.clone(), i, i + 7).await;
+
+                let (resp_tx, resp_rx) = oneshot::channel::<Option<i32>>();
+                read(&mut sender.clone(), i, resp_tx).await;
+                let v = resp_rx.await.unwrap();
+                assert_eq!(v, Some(i + 7));
+            }
         }).await;
     }
 }
