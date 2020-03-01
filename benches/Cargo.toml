@@ -1,0 +1,15 @@
+[package]
+name = "benches"
+version = "0.0.0"
+publish = false
+edition = "2018"
+
+[dependencies]
+tmap = { path = "../" }
+bencher = "0.1.5"
+tokio = { version = "0.2", features = ["full"] }
+
+[[bench]]
+name = "lib"
+path = "lib.rs"
+harness = false
